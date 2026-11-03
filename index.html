@@ -586,78 +586,6 @@
             }
         }
 
-        function getGenealogyOrderedMembers() {
-            // Thứ tự chuẩn: đi theo từng nhánh từ trên xuống dưới (pre-order),
-            // anh/chị trước em; vợ/chồng đứng ngay sau người thuộc nhánh huyết thống.
-            const ordered = [];
-            const added = new Set();
-            const bloodlineVisited = new Set();
-            const byId = new Map(members.map(m => [String(m.id), m]));
-            const cleanId = value => String(value == null ? '' : value).trim();
-            const orderValue = m => {
-                const n = Number.parseInt(m.orderIndex, 10);
-                return Number.isFinite(n) ? n : 999999;
-            };
-            const compareSibling = (a, b) => {
-                const orderDiff = orderValue(a) - orderValue(b);
-                if (orderDiff) return orderDiff;
-                const yearA = parseYear(a.birthYear), yearB = parseYear(b.birthYear);
-                if (yearA !== yearB) return yearA - yearB;
-                return String(a.name || '').localeCompare(String(b.name || ''), 'vi');
-            };
-            const getSpouses = person => {
-                const ids = new Set((Array.isArray(person.spouseIds) ? person.spouseIds : []).map(cleanId));
-                members.forEach(other => {
-                    if ((Array.isArray(other.spouseIds) ? other.spouseIds : []).some(id => cleanId(id) === cleanId(person.id))) ids.add(cleanId(other.id));
-                });
-                ids.delete(cleanId(person.id));
-                return [...ids].map(id => byId.get(id)).filter(Boolean).sort((a, b) => {
-                    // Nếu là cặp nam-nữ thì nam trước, vợ ngay sau chồng.
-                    if (a.gender !== b.gender) return a.gender === 'Nữ' ? 1 : -1;
-                    return compareSibling(a, b);
-                });
-            };
-            const appendSpouseUnit = person => {
-                if (!person) return;
-                const id = cleanId(person.id);
-                const spouses = getSpouses(person);
-                // Nếu người thuộc huyết thống là nữ, đưa chồng lên trước để vợ luôn ngay sau chồng.
-                const husband = person.gender === 'Nữ' ? spouses.find(sp => sp.gender === 'Nam') : null;
-                const unit = husband ? [husband, person, ...spouses.filter(sp => sp !== husband)] : [person, ...spouses];
-                unit.forEach(member => {
-                    const memberId = cleanId(member.id);
-                    if (!added.has(memberId)) { ordered.push(member); added.add(memberId); }
-                });
-            };
-            const visitBloodline = person => {
-                if (!person) return;
-                const id = cleanId(person.id);
-                if (bloodlineVisited.has(id)) return;
-                bloodlineVisited.add(id);
-                appendSpouseUnit(person);
-                const children = members.filter(m => cleanId(m.fatherId) === id || cleanId(m.motherId) === id).sort(compareSibling);
-                children.forEach(child => visitBloodline(child));
-            };
-
-            // Gốc là người không có cha/mẹ và không chỉ là vợ/chồng của một gốc khác.
-            let roots = members.filter(m => {
-                if (m.fatherId || m.motherId) return false;
-                const isSpouseOfAnotherRoot = members.some(other =>
-                    cleanId(other.id) !== cleanId(m.id) &&
-                    (!other.fatherId && !other.motherId) &&
-                    ((other.spouseIds || []).some(id => cleanId(id) === cleanId(m.id)) || (m.spouseIds || []).some(id => cleanId(id) === cleanId(other.id)))
-                );
-                return !isSpouseOfAnotherRoot;
-            }).sort(compareSibling);
-            roots.forEach(root => visitBloodline(root));
-
-            // Dữ liệu mồ côi/thiếu liên kết vẫn được hiển thị ổn định ở cuối danh sách.
-            members.filter(m => !added.has(cleanId(m.id)))
-                .sort((a, b) => (a.generation || 1) - (b.generation || 1) || compareSibling(a, b))
-                .forEach(m => visitBloodline(m));
-            return ordered;
-        }
-
         function updateGenerationFilterOptions() {
             const filterSelect = document.getElementById('filter-generation');
             if (!filterSelect) return;
@@ -671,13 +599,73 @@
             filterSelect.value = currentValue;
         }
 
+        // Thứ tự thống nhất cho mọi danh sách: duyệt theo nhánh gia phả từ trên xuống.
+        // Trong cùng một gia đình: anh/chị trước em; vợ đứng ngay sau chồng.
+        function getGenealogyOrderedMembers() {
+            const ordered = [];
+            const added = new Set();
+            const visitedBloodline = new Set();
+            const idOf = value => String(value == null ? '' : value).trim();
+            const byId = new Map(members.map(m => [idOf(m.id), m]));
+            const orderOf = m => {
+                const n = Number.parseInt(m.orderIndex, 10);
+                return Number.isFinite(n) ? n : 999999;
+            };
+            const compareSibling = (a, b) => {
+                const diff = orderOf(a) - orderOf(b);
+                if (diff) return diff;
+                const ya = parseYear(a.birthYear), yb = parseYear(b.birthYear);
+                if (ya !== yb) return ya - yb;
+                return String(a.name || '').localeCompare(String(b.name || ''), 'vi');
+            };
+            const spousesOf = person => {
+                const ids = new Set((Array.isArray(person.spouseIds) ? person.spouseIds : []).map(idOf));
+                members.forEach(other => {
+                    if ((Array.isArray(other.spouseIds) ? other.spouseIds : []).some(x => idOf(x) === idOf(person.id))) ids.add(idOf(other.id));
+                });
+                ids.delete(idOf(person.id));
+                return [...ids].map(id => byId.get(id)).filter(Boolean).sort(compareSibling);
+            };
+            const appendPersonAndSpouses = person => {
+                const spouses = spousesOf(person);
+                // Với người thuộc huyết thống là nữ, đưa chồng ngay trước vợ.
+                const husband = person.gender === 'Nữ' ? spouses.find(x => x.gender === 'Nam') : null;
+                const group = husband
+                    ? [husband, person, ...spouses.filter(x => x !== husband)]
+                    : [person, ...spouses];
+                group.forEach(item => {
+                    const id = idOf(item.id);
+                    if (!added.has(id)) { ordered.push(item); added.add(id); }
+                });
+            };
+            const visit = person => {
+                if (!person) return;
+                const id = idOf(person.id);
+                if (visitedBloodline.has(id)) return;
+                visitedBloodline.add(id);
+                appendPersonAndSpouses(person);
+                const children = members.filter(m => idOf(m.fatherId) === id || idOf(m.motherId) === id).sort(compareSibling);
+                children.forEach(visit);
+            };
+
+            let roots = members.filter(m => !m.fatherId && !m.motherId);
+            roots = roots.filter(m => !roots.some(other => idOf(other.id) !== idOf(m.id) &&
+                (spousesOf(other).some(sp => idOf(sp.id) === idOf(m.id)))));
+            roots.sort(compareSibling).forEach(visit);
+
+            // Dữ liệu thiếu liên kết vẫn được hiển thị, không bị mất khỏi danh sách.
+            members.filter(m => !added.has(idOf(m.id)))
+                .sort((a, b) => (Number(a.generation) || 1) - (Number(b.generation) || 1) || compareSibling(a, b))
+                .forEach(visit);
+            return ordered;
+        }
+
         function updateAncestorFilterOptions() {
             const ancestorSelect = document.getElementById('filter-ancestor');
             if (!ancestorSelect) return;
             const currentValue = ancestorSelect.value;
-            const sortedMembers = getGenealogyOrderedMembers();
             ancestorSelect.innerHTML = '<option value="">-- Tất cả các nhánh (Con cháu của...) --</option>';
-            sortedMembers.forEach(m => {
+            getGenealogyOrderedMembers().forEach(m => {
                 const genLabel = m.generation ? `(Đời F${m.generation})` : '';
                 ancestorSelect.innerHTML += `<option value="${m.id}">Con cháu của: ${m.name} ${genLabel}</option>`;
             });
@@ -689,31 +677,25 @@
             const descendantSet = new Set();
             const bloodlineSet = new Set([ancestorKey]);
             const queue = [ancestorKey];
-
             while (queue.length) {
                 const currentId = queue.shift();
-                const children = members.filter(m =>
-                    String(m.fatherId || '').trim() === currentId || String(m.motherId || '').trim() === currentId
-                );
-                children.forEach(child => {
-                    const childId = String(child.id || '').trim();
-                    if (!childId || bloodlineSet.has(childId)) return;
-                    bloodlineSet.add(childId);
-                    descendantSet.add(childId);
-                    queue.push(childId);
-                });
+                members.filter(m => String(m.fatherId || '').trim() === currentId || String(m.motherId || '').trim() === currentId)
+                    .forEach(child => {
+                        const childId = String(child.id || '').trim();
+                        if (!childId || bloodlineSet.has(childId)) return;
+                        bloodlineSet.add(childId);
+                        descendantSet.add(childId);
+                        queue.push(childId);
+                    });
             }
-
-            // Chỉ thêm dâu/rể của con cháu; tuyệt đối không thêm vợ/chồng của cụ được lọc.
+            // Thêm dâu/rể của con cháu, nhưng không thêm vợ/chồng của chính cụ được chọn.
             bloodlineSet.forEach(personId => {
                 if (personId === ancestorKey) return;
                 const person = members.find(m => String(m.id).trim() === personId);
                 if (!person) return;
-                const spouseIds = new Set((Array.isArray(person.spouseIds) ? person.spouseIds : []).map(id => String(id).trim()));
+                const spouseIds = new Set((Array.isArray(person.spouseIds) ? person.spouseIds : []).map(x => String(x).trim()));
                 members.forEach(other => {
-                    if ((Array.isArray(other.spouseIds) ? other.spouseIds : []).some(id => String(id).trim() === personId)) {
-                        spouseIds.add(String(other.id).trim());
-                    }
+                    if ((Array.isArray(other.spouseIds) ? other.spouseIds : []).some(x => String(x).trim() === personId)) spouseIds.add(String(other.id).trim());
                 });
                 spouseIds.forEach(spouseId => {
                     if (spouseId && spouseId !== ancestorKey && !bloodlineSet.has(spouseId)) descendantSet.add(spouseId);
@@ -1371,12 +1353,11 @@ function convertLunarToSolar(lunarMonth, lunarDay) {
                 return matchSearch && matchGen && matchStatus && matchAncestor && matchGender && matchBranch;
             });
 
-            // 2. Dùng chung thứ tự gia phả cho bảng: bề trên trước, duyệt hết nhánh anh/chị rồi đến nhánh em.
+            // Sắp xếp bằng cùng một thứ tự gia phả dùng cho mọi danh sách.
             const genealogyOrder = new Map(getGenealogyOrderedMembers().map((m, index) => [String(m.id), index]));
-            filtered.sort((a, b) => (genealogyOrder.get(String(a.id)) ?? 999999) - (genealogyOrder.get(String(b.id)) ?? 999999));
-
-            // Danh sách đã được sắp theo thứ tự gia phả chung, vợ/chồng đã đứng cạnh nhau.
-            let finalOrderedList = filtered;
+            const finalOrderedList = filtered.sort((a, b) =>
+                (genealogyOrder.get(String(a.id)) ?? 999999) - (genealogyOrder.get(String(b.id)) ?? 999999)
+            );
 
             if (finalOrderedList.length === 0) {
                 tbody.innerHTML = `<tr><td colspan="9" class="p-4 text-center text-stone-500">Không tìm thấy thành viên nào phù hợp.</td></tr>`;
@@ -1427,9 +1408,8 @@ function convertLunarToSolar(lunarMonth, lunarDay) {
             const ancestorSelect = document.getElementById('filter-ancestor');
             if (!ancestorSelect) return;
             const currentValue = ancestorSelect.value;
-            const sortedMembers = getGenealogyOrderedMembers();
             ancestorSelect.innerHTML = '<option value="">-- Tất cả các nhánh (Con cháu của...) --</option>';
-            sortedMembers.forEach(m => {
+            getGenealogyOrderedMembers().forEach(m => {
                 const genLabel = m.generation ? `(Đời F${m.generation})` : '';
                 ancestorSelect.innerHTML += `<option value="${m.id}">Con cháu của: ${m.name} ${genLabel}</option>`;
             });
@@ -1441,13 +1421,15 @@ function convertLunarToSolar(lunarMonth, lunarDay) {
             tbody.innerHTML = '';
 
             let anniversaryList = [];
+            const anniversaryOrder = new Map(getGenealogyOrderedMembers().map((m, index) => [String(m.id), index]));
 
             members.filter(m => m.status === 'Đã mất').forEach(m => {
                 anniversaryList.push({
                     name: m.name,
                     role: `Thành viên đời F${m.generation || '?'}`,
                     deathDate: m.deathDate,
-                    notes: m.notes || m.burialPlace || '-'
+                    notes: m.notes || m.burialPlace || '-',
+                    _order: anniversaryOrder.get(String(m.id)) ?? 999999
                 });
             });
 
@@ -1464,7 +1446,8 @@ function convertLunarToSolar(lunarMonth, lunarDay) {
                                 name: sp.inlawFather,
                                 role: `Bố đẻ của ${sp.name} (${sp.gender === 'Nam' ? 'Dâu' : 'Rể'} nhà ${m.name})`,
                                 deathDate: sp.inlawFatherDeath,
-                                notes: 'Thông gia'
+                                notes: 'Thông gia',
+                                _order: anniversaryOrder.get(String(m.id)) ?? 999999
                             });
                         }
                         if (sp.inlawMotherStatus === 'Đã mất' && sp.inlawMotherDeath) {
@@ -1472,12 +1455,15 @@ function convertLunarToSolar(lunarMonth, lunarDay) {
                                 name: sp.inlawMother,
                                 role: `Mẹ đẻ của ${sp.name} (${sp.gender === 'Nam' ? 'Dâu' : 'Rể'} nhà ${m.name})`,
                                 deathDate: sp.inlawMotherDeath,
-                                notes: 'Thông gia'
+                                notes: 'Thông gia',
+                                _order: anniversaryOrder.get(String(m.id)) ?? 999999
                             });
                         }
                     }
                 });
             });
+
+            anniversaryList.sort((a, b) => (a._order ?? 999999) - (b._order ?? 999999));
 
             if (anniversaryList.length === 0) {
                 tbody.innerHTML = `<tr><td colspan="4" class="p-4 text-center text-stone-500">Chưa có thông tin ghi nhận ngày giỗ.</td></tr>`;
@@ -1517,8 +1503,12 @@ function convertLunarToSolar(lunarMonth, lunarDay) {
             const spouseDisplay = spouses.length > 0 ? spouses.map(s => `${s.name} (${s.gender === 'Nam' ? 'Chồng' : 'Vợ'})`).join(', ') : 'Chưa có';
 
             let children = members.filter(item => item.fatherId === id || item.motherId === id);
-            const genealogyOrder = new Map(getGenealogyOrderedMembers().map((item, index) => [String(item.id), index]));
-            children.sort((a, b) => (genealogyOrder.get(String(a.id)) ?? 999999) - (genealogyOrder.get(String(b.id)) ?? 999999));
+            children.sort((a, b) => {
+                const orderA = a.orderIndex !== undefined && a.orderIndex !== "" ? parseInt(a.orderIndex) : 999;
+                const orderB = b.orderIndex !== undefined && b.orderIndex !== "" ? parseInt(b.orderIndex) : 999;
+                if (orderA !== orderB) return orderA - orderB;
+                return parseYear(a.birthYear) - parseYear(b.birthYear);
+            });
 
             let inlawList = [];
             children.forEach(child => {
