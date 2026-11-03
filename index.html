@@ -599,77 +599,89 @@
             filterSelect.value = currentValue;
         }
 
-        // Thứ tự thống nhất cho mọi danh sách: duyệt theo nhánh gia phả từ trên xuống.
-        // Trong cùng một gia đình: anh/chị trước em; vợ đứng ngay sau chồng.
+        // So sánh anh/chị/em trong cùng một nhánh.
+        // orderIndex là thứ tự ưu tiên do gia đình nhập; nếu bằng/thiếu thì dùng năm sinh,
+        // cuối cùng giữ nguyên thứ tự dòng dữ liệu để tránh xáo trộn ngẫu nhiên.
+        function compareGenealogySiblings(a, b) {
+            const numberOrNull = value => {
+                if (value === undefined || value === null || String(value).trim() === '') return null;
+                const n = Number(String(value).trim());
+                return Number.isFinite(n) ? n : null;
+            };
+            const oa = numberOrNull(a.orderIndex), ob = numberOrNull(b.orderIndex);
+            if (oa !== null && ob !== null && oa !== ob) return oa - ob;
+            if (oa !== null && ob === null) return -1;
+            if (oa === null && ob !== null) return 1;
+            const ya = parseYear(a.birthYear), yb = parseYear(b.birthYear);
+            if (ya !== yb) return ya - yb;
+            return (members.indexOf(a) - members.indexOf(b));
+        }
+
+        // Duyệt theo thứ tự gia phả kiểu preorder:
+        // cụ trước -> vợ ngay sau chồng -> toàn bộ nhánh con của người anh/chị
+        // -> sau đó mới đến nhánh của người em.
         function getGenealogyOrderedMembers() {
             const ordered = [];
             const added = new Set();
             const visitedBloodline = new Set();
             const idOf = value => String(value == null ? '' : value).trim();
             const byId = new Map(members.map(m => [idOf(m.id), m]));
-            const orderOf = m => {
-                const n = Number.parseInt(m.orderIndex, 10);
-                return Number.isFinite(n) ? n : 999999;
-            };
-            const compareSibling = (a, b) => {
-                const diff = orderOf(a) - orderOf(b);
-                if (diff) return diff;
-                const ya = parseYear(a.birthYear), yb = parseYear(b.birthYear);
-                if (ya !== yb) return ya - yb;
-                return String(a.name || '').localeCompare(String(b.name || ''), 'vi');
-            };
+
             const spousesOf = person => {
                 const ids = new Set((Array.isArray(person.spouseIds) ? person.spouseIds : []).map(idOf));
                 members.forEach(other => {
                     if ((Array.isArray(other.spouseIds) ? other.spouseIds : []).some(x => idOf(x) === idOf(person.id))) ids.add(idOf(other.id));
                 });
                 ids.delete(idOf(person.id));
-                return [...ids].map(id => byId.get(id)).filter(Boolean).sort(compareSibling);
+                return [...ids].map(id => byId.get(id)).filter(Boolean).sort(compareGenealogySiblings);
             };
+
             const appendPersonAndSpouses = person => {
                 const spouses = spousesOf(person);
-                // Với người thuộc huyết thống là nữ, đưa chồng ngay trước vợ.
+                // Nếu người thuộc huyết thống là nữ, đặt chồng ngay trước cô ấy.
                 const husband = person.gender === 'Nữ' ? spouses.find(x => x.gender === 'Nam') : null;
                 const group = husband
                     ? [husband, person, ...spouses.filter(x => x !== husband)]
                     : [person, ...spouses];
                 group.forEach(item => {
                     const id = idOf(item.id);
-                    if (!added.has(id)) { ordered.push(item); added.add(id); }
+                    if (id && !added.has(id)) {
+                        ordered.push(item);
+                        added.add(id);
+                    }
                 });
             };
+
             const visit = person => {
                 if (!person) return;
                 const id = idOf(person.id);
-                if (visitedBloodline.has(id)) return;
+                if (!id || visitedBloodline.has(id)) return;
                 visitedBloodline.add(id);
                 appendPersonAndSpouses(person);
-                const children = members.filter(m => idOf(m.fatherId) === id || idOf(m.motherId) === id).sort(compareSibling);
+
+                // Cùng bố hoặc cùng mẹ được xem là cùng nhóm anh chị em.
+                // Sắp theo orderIndex (nếu có), sau đó năm sinh.
+                const children = members
+                    .filter(m => idOf(m.fatherId) === id || idOf(m.motherId) === id)
+                    .sort(compareGenealogySiblings);
                 children.forEach(visit);
             };
 
             let roots = members.filter(m => !m.fatherId && !m.motherId);
-            roots = roots.filter(m => !roots.some(other => idOf(other.id) !== idOf(m.id) &&
-                (spousesOf(other).some(sp => idOf(sp.id) === idOf(m.id)))));
-            roots.sort(compareSibling).forEach(visit);
+            // Nếu một gốc chỉ là vợ/chồng của gốc khác, để người phối ngẫu đứng cạnh người kia.
+            roots = roots.filter(m => {
+                // Không lấy dâu/rể làm gốc độc lập nếu người phối ngẫu thuộc dòng chính.
+                // Trường hợp gốc là vợ chồng chưa có cha/mẹ: giữ người chồng làm điểm bắt đầu,
+                // để người vợ được thêm ngay sau chồng trong appendPersonAndSpouses().
+                return !spousesOf(m).some(sp => sp.fatherId || sp.motherId || sp.gender === 'Nam');
+            });
+            roots.sort(compareGenealogySiblings).forEach(visit);
 
-            // Dữ liệu thiếu liên kết vẫn được hiển thị, không bị mất khỏi danh sách.
+            // Dữ liệu thiếu liên kết cha/mẹ vẫn được đưa vào cuối theo đời rồi theo thứ tự anh/chị em.
             members.filter(m => !added.has(idOf(m.id)))
-                .sort((a, b) => (Number(a.generation) || 1) - (Number(b.generation) || 1) || compareSibling(a, b))
+                .sort((a, b) => (Number(a.generation) || 1) - (Number(b.generation) || 1) || compareGenealogySiblings(a, b))
                 .forEach(visit);
             return ordered;
-        }
-
-        function updateAncestorFilterOptions() {
-            const ancestorSelect = document.getElementById('filter-ancestor');
-            if (!ancestorSelect) return;
-            const currentValue = ancestorSelect.value;
-            ancestorSelect.innerHTML = '<option value="">-- Tất cả các nhánh (Con cháu của...) --</option>';
-            getGenealogyOrderedMembers().forEach(m => {
-                const genLabel = m.generation ? `(Đời F${m.generation})` : '';
-                ancestorSelect.innerHTML += `<option value="${m.id}">Con cháu của: ${m.name} ${genLabel}</option>`;
-            });
-            ancestorSelect.value = currentValue;
         }
 
         function getAllDescendantIds(ancestorId) {
@@ -898,12 +910,7 @@ function convertLunarToSolar(lunarMonth, lunarDay) {
             }
             if (rootMembers.length === 0) rootMembers = [members[0]];
 
-            rootMembers.sort((a, b) => {
-                const orderA = a.orderIndex !== undefined && a.orderIndex !== "" ? parseInt(a.orderIndex) : 999;
-                const orderB = b.orderIndex !== undefined && b.orderIndex !== "" ? parseInt(b.orderIndex) : 999;
-                if (orderA !== orderB) return orderA - orderB;
-                return parseYear(a.birthYear) - parseYear(b.birthYear);
-            });
+            rootMembers.sort(compareGenealogySiblings);
 
             let addedNodeIds = new Set();
 
@@ -920,12 +927,7 @@ function convertLunarToSolar(lunarMonth, lunarDay) {
                     children = members.filter(item => (item.fatherId === memberId || item.motherId === memberId) && !addedNodeIds.has(item.id));
                 }
 
-                children.sort((a, b) => {
-                    const orderA = a.orderIndex !== undefined && a.orderIndex !== "" ? parseInt(a.orderIndex) : 999;
-                    const orderB = b.orderIndex !== undefined && b.orderIndex !== "" ? parseInt(b.orderIndex) : 999;
-                    if (orderA !== orderB) return orderA - orderB;
-                    return parseYear(a.birthYear) - parseYear(b.birthYear);
-                });
+                children.sort(compareGenealogySiblings);
 
                 return {
                     ...m,
@@ -1372,7 +1374,9 @@ function convertLunarToSolar(lunarMonth, lunarDay) {
                 members.forEach(other => {
                     if ((other.spouseIds || []).includes(m.id)) allSpouseIds.add(other.id);
                 });
-                const spouses = Array.from(allSpouseIds).map(id => members.find(s => s.id === id)).filter(Boolean);
+                const genealogyPosition = new Map(getGenealogyOrderedMembers().map((person, index) => [String(person.id), index]));
+            const spouses = Array.from(allSpouseIds).map(id => members.find(s => s.id === id)).filter(Boolean)
+                .sort((a, b) => (genealogyPosition.get(String(a.id)) ?? 999999) - (genealogyPosition.get(String(b.id)) ?? 999999));
                 const spouseNames = spouses.length > 0 ? spouses.map(s => s.name).join(', ') : '-';
                 
                 const timeInfo = m.status === 'Đã mất' ? `<span class="text-crimson font-medium">Giỗ: ${m.deathDate || 'Chưa rõ'}</span>` : `Sinh: ${m.birthYear || '-'}`;
@@ -1503,12 +1507,7 @@ function convertLunarToSolar(lunarMonth, lunarDay) {
             const spouseDisplay = spouses.length > 0 ? spouses.map(s => `${s.name} (${s.gender === 'Nam' ? 'Chồng' : 'Vợ'})`).join(', ') : 'Chưa có';
 
             let children = members.filter(item => item.fatherId === id || item.motherId === id);
-            children.sort((a, b) => {
-                const orderA = a.orderIndex !== undefined && a.orderIndex !== "" ? parseInt(a.orderIndex) : 999;
-                const orderB = b.orderIndex !== undefined && b.orderIndex !== "" ? parseInt(b.orderIndex) : 999;
-                if (orderA !== orderB) return orderA - orderB;
-                return parseYear(a.birthYear) - parseYear(b.birthYear);
-            });
+            children.sort(compareGenealogySiblings);
 
             let inlawList = [];
             children.forEach(child => {
